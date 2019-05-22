@@ -6553,7 +6553,7 @@ void main()
                 defines.HAS_NORMALMAP = 1;
             }
             // BRDFLUT
-            pending.push(parser.loadTextureFromSrc(materialParams, 'tLUT', '/examples/assets/images/brdfLUT.png', false));
+            pending.push(parser.loadTextureFromSrc(materialParams, 'tLUT', '/glTFLoader/examples/assets/images/brdfLUT.png', false));
             if (parser.envDiffuseCubeMapSrc) pending.push(parser.loadCubeMapFromSrc(materialParams, 'tEnvDiffuse', parser.envDiffuseCubeMapSrc, false));
             if (parser.envSpecularCubeMapSrc) pending.push(parser.loadCubeMapFromSrc(materialParams, 'tEnvSpecular', parser.envSpecularCubeMapSrc, false));
             // This is a multiplier to the amount of specular. Especially useful if you don't have an HDR map.
