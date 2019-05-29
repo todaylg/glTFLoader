@@ -40,6 +40,7 @@ mat4 getBoneMatrix(const in float i) {
 #endif
 
 uniform mat4 modelMatrix;
+uniform mat4 viewMatrix;
 uniform mat4 modelViewMatrix;
 uniform mat4 projectionMatrix;
 uniform mat3 normalMatrix;
@@ -91,14 +92,16 @@ void main() {
     vNormal = vec4(skinMatrix * vec4(vNormal, 0.0)).xyz;
 
     // Update position
-    vec4 bindPos = vec4(position, 1.0);
-    vec4 transformed = vec4(0.0);
-    transformed += boneMatX * bindPos * skinWeight.x;
-    transformed += boneMatY * bindPos * skinWeight.y;
-    transformed += boneMatZ * bindPos * skinWeight.z;
-    transformed += boneMatW * bindPos * skinWeight.w;
+    vec4 Pos = vec4(position, 1.0);
+    vec4 transformed = skinMatrix * Pos;
+
+    // vec4 transformed = vec4(0.0);
+    // transformed += boneMatX * bindPos * skinWeight.x;
+    // transformed += boneMatY * bindPos * skinWeight.y;
+    // transformed += boneMatZ * bindPos * skinWeight.z;
+    // transformed += boneMatW * bindPos * skinWeight.w;
     
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed.xyz, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * transformed; //model already calculate in boneMatrix
     #else
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     #endif
@@ -135,9 +138,6 @@ in vec3 vNormal;
 #endif
 
 #ifdef USE_IBL
-// uniform sampler2D u_brdfLUT;
-// uniform samplerCube u_DiffuseEnvSampler;
-// uniform samplerCube u_SpecularEnvSampler;
 uniform sampler2D tLUT;
 uniform samplerCube tEnvDiffuse;
 uniform samplerCube tEnvSpecular;
@@ -165,11 +165,6 @@ uniform float u_OcclusionStrength;
 uniform vec2 u_MetallicRoughnessValues;
 uniform vec4 u_BaseColorFactor;
 uniform vec3 cameraPosition;
-
-// debugging flags used for shader output of intermediate PBR variables
-vec4 u_ScaleDiffBaseMR = vec4(0.0, 0.0, 0.0, 0.0);
-vec4 u_ScaleFGDSpec = vec4(0.0, 0.0, 0.0, 0.0);
-vec4 u_ScaleIBLAmbient = vec4(1.0, 1.0, 1.0, 1.0);
 
 // Light(Test)
 vec3 lightPos = vec3(0.0,5.0,0.0);
@@ -292,10 +287,6 @@ vec3 getIBLContribution(PBRInfo pbrInputs, vec3 n, vec3 reflection)
     vec3 diffuse = diffuseLight * pbrInputs.diffuseColor;
     vec3 specular = specularLight * (pbrInputs.specularColor * brdf.x + brdf.y);
 
-    // For presentation, this allows us to disable IBL terms
-    diffuse *= u_ScaleIBLAmbient.x;
-    specular *= u_ScaleIBLAmbient.y;
-
     return diffuse + specular;
 }
 #endif
@@ -350,11 +341,11 @@ void main()
     float perceptualRoughness = u_MetallicRoughnessValues.y;
     float metallic = u_MetallicRoughnessValues.x;
     #ifdef HAS_METALROUGHNESSMAP
-    // Roughness is stored in the 'g' channel, metallic is stored in the 'b' channel.
-    // This layout intentionally reserves the 'r' channel for (optional) occlusion map data
-    vec4 mrSample = texture(u_MetallicRoughnessSampler, vUv);
-    perceptualRoughness = mrSample.g * perceptualRoughness;
-    metallic = mrSample.b * metallic;
+        // Roughness is stored in the 'g' channel, metallic is stored in the 'b' channel.
+        // This layout intentionally reserves the 'r' channel for (optional) occlusion map data
+        vec4 mrSample = texture(u_MetallicRoughnessSampler, vUv);
+        perceptualRoughness = mrSample.g * perceptualRoughness;
+        metallic = mrSample.b * metallic;
     #endif
     perceptualRoughness = clamp(perceptualRoughness, c_MinRoughness, 1.0);
     metallic = clamp(metallic, 0.0, 1.0);
@@ -364,9 +355,9 @@ void main()
 
     // The albedo may be defined from a base texture or a flat color
     #ifdef HAS_BASECOLORMAP
-    vec4 baseColor = SRGBtoLINEAR(texture(u_BaseColorSampler, vUv)) * u_BaseColorFactor;
+        vec4 baseColor = SRGBtoLINEAR(texture(u_BaseColorSampler, vUv)) * u_BaseColorFactor;
     #else
-    vec4 baseColor = u_BaseColorFactor;
+        vec4 baseColor = u_BaseColorFactor;
     #endif
 
     vec3 f0 = vec3(0.04);
@@ -384,7 +375,7 @@ void main()
     vec3 specularEnvironmentR90 = vec3(1.0, 1.0, 1.0) * reflectance90;
 
     vec3 n = getNormal();                             // normal at surface point
-    vec3 v = normalize(cameraPosition - vPosition);        // Vector from surface point to camera
+    vec3 v = normalize(cameraPosition - vPosition);   // Vector from surface point to camera
     vec3 l = normalize(u_LightDirection);             // Vector from surface point to light
     vec3 h = normalize(l+v);                          // Half vector between both l and v
     vec3 reflection = -normalize(reflect(v, n));
@@ -423,33 +414,21 @@ void main()
 
     // Calculate lighting contribution from image based lighting source (IBL)
     #ifdef USE_IBL
-    color += getIBLContribution(pbrInputs, n, reflection);
+        color += getIBLContribution(pbrInputs, n, reflection);
     #endif
 
     // Apply optional PBR terms for additional (optional) shading
     #ifdef HAS_OCCLUSIONMAP
-    float ao = texture(u_OcclusionSampler, vUv).r;
-    color = mix(color, color * ao, u_OcclusionStrength);
+        float ao = texture(u_OcclusionSampler, vUv).r;
+        color = mix(color, color * ao, u_OcclusionStrength);
     #endif
 
     #ifdef HAS_EMISSIVEMAP
-    vec3 emissive = SRGBtoLINEAR(texture(u_EmissiveSampler, vUv)).rgb * u_EmissiveFactor;
-    color += emissive;
+        vec3 emissive = SRGBtoLINEAR(texture(u_EmissiveSampler, vUv)).rgb * u_EmissiveFactor;
+        color += emissive;
     #endif
 
-    // This section uses mix to override final color for reference app visualization
-    // of various parameters in the lighting equation.
-    color = mix(color, F, u_ScaleFGDSpec.x);
-    color = mix(color, vec3(G), u_ScaleFGDSpec.y);
-    color = mix(color, vec3(D), u_ScaleFGDSpec.z);
-    color = mix(color, specContrib, u_ScaleFGDSpec.w);
-
-    color = mix(color, diffuseContrib, u_ScaleDiffBaseMR.x);
-    color = mix(color, baseColor.rgb, u_ScaleDiffBaseMR.y);
-    color = mix(color, vec3(metallic), u_ScaleDiffBaseMR.z);
-    color = mix(color, vec3(perceptualRoughness), u_ScaleDiffBaseMR.w);
-
-    FragColor = vec4(pow(color,vec3(1.0/2.2)), baseColor.a);
+    FragColor = vec4(color, baseColor.a);
 }
 
 `;
