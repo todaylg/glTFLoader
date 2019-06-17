@@ -39,6 +39,15 @@ mat4 getBoneMatrix(const in float i) {
 }
 #endif
 
+
+#ifdef HAS_MORPH_TARGETS
+uniform vec2 TAR_WEIGHT; //morph target weight
+in vec3 TAR_POSITION_0;
+in vec3 TAR_POSITION_1;
+in vec3 TAR_NORMAL_0;
+in vec3 TAR_NORMAL_1;
+#endif
+
 uniform mat4 modelMatrix;
 uniform mat4 viewMatrix;
 uniform mat4 modelViewMatrix;
@@ -56,7 +65,14 @@ out vec3 vNormal;
 #endif
 
 void main() {
-    vec4 pos = modelMatrix * vec4(position,1.0);
+    vec3 tPosition = position;
+    #ifdef HAS_MORPH_TARGETS
+        tPosition = position + 
+        TAR_POSITION_0 * TAR_WEIGHT.x +
+        TAR_POSITION_1 * TAR_WEIGHT.y;
+    #endif
+
+    vec4 pos = modelMatrix * vec4(tPosition,1.0);
     vPosition = vec3(pos.xyz) / pos.w;
 
     #ifdef HAS_NORMALS
@@ -92,7 +108,7 @@ void main() {
     vNormal = vec4(skinMatrix * vec4(vNormal, 0.0)).xyz;
 
     // Update position
-    vec4 Pos = vec4(position, 1.0);
+    vec4 Pos = vec4(tPosition, 1.0);
     vec4 transformed = skinMatrix * Pos;
 
     // vec4 transformed = vec4(0.0);
@@ -103,7 +119,7 @@ void main() {
     
     gl_Position = projectionMatrix * viewMatrix * transformed; //model already calculate in boneMatrix
     #else
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(tPosition, 1.0);
     #endif
 }
 `;
@@ -173,8 +189,6 @@ vec3 u_LightColor = vec3(1.0,1.0,1.0);
 const float PI = 3.14159265359;
 const float RECIPROCAL_PI = 0.31830988618;
 const float RECIPROCAL_PI2 = 0.15915494;
-const float LN2 = 0.6931472;
-const float ENV_LODS = 6.0;
 
 out vec4 FragColor;
 
@@ -415,6 +429,8 @@ void main()
     // Calculate lighting contribution from image based lighting source (IBL)
     #ifdef USE_IBL
         color += getIBLContribution(pbrInputs, n, reflection);
+    #else
+        color += 2. * (diffuseContrib + specContrib); //Test
     #endif
 
     // Apply optional PBR terms for additional (optional) shading

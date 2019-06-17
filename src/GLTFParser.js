@@ -1,24 +1,24 @@
-import { Transform, Mat4, Camera, Color, Program, Geometry, Texture, Mesh, Vec4, Skin, AnimationSystem, AnimationChannel, Animation } from 'LGL';
-import { GLTFRegistry, resolveURL, definesToString } from './Util.js';
-import { WEBGL_TYPE_SIZES, WEBGL_COMPONENT_TYPES, ALPHA_MODES, ATTRIBUTES, WEBGL_CONSTANTS } from './Const.js';
+import { Transform, Mat4, Camera, Color, Program, Geometry, Texture, Mesh, Vec4, Vec2, Skin } from 'LGL';
+import { GLTFRegistry, resolveURL, definesToString, sliceBlockData, isPrimitiveEqual } from './Util.js';
+import { WEBGL_TYPE_SIZES, WEBGL_COMPONENT_TYPES, ALPHA_MODES, ATTRIBUTES, WEBGL_CONSTANTS, BRDF_LUT_URL } from './Const.js';
 import { BufferAttribute } from './bufferHandler/BufferAttribute.js';
 import PBRBaseShader from './shaders/PBRBaseShader.js';
+import { AnimationSystem, AnimationChannel, Animation } from '../Animation.js';
 
 export default class GLTFParser {
     constructor(gl, json, options = {}) {
         this.gl = gl;
         this.json = json || {};
-        // Cache
-        this.cache = new GLTFRegistry();
         this.path = options.path || '';
-        this.useIBL = options.useIBL == undefined ? true : options.useIBL;
+        this.useIBL = options.useIBL == undefined ? false : options.useIBL;
         this.envDiffuseCubeMapSrc = options.envDiffuseCubeMapSrc;
         this.envSpecularCubeMapSrc = options.envSpecularCubeMapSrc;
-        this.glExtension = {
-            hasSRGBExt: gl.getExtension('EXT_SRGB'),
-            hasLODExtension: gl.getExtension('EXT_shader_texture_lod'),
-        };
+        this.glExtension = options.glExtension || {};
+        this.defaultShader;
         this.animationSys = json.animations ? new AnimationSystem() : null;
+        // Cache
+        this.cache = new GLTFRegistry();
+        this.primitiveCache = [];
     }
     parse(onLoad, onError) {
         let json = this.json;
@@ -107,6 +107,7 @@ export default class GLTFParser {
     getDependency(type, index) {
         let cacheKey = type + ':' + index;
         let dependency = this.cache.get(cacheKey);
+        let res = this.cache.getAll();
         if (!dependency) {
             switch (type) {
                 case 'scene':
@@ -145,6 +146,7 @@ export default class GLTFParser {
                 default:
                     throw new Error('Unknown type: ' + type);
             }
+            this.cache.add(cacheKey, dependency);
         }
         return dependency;
     }
@@ -200,7 +202,7 @@ export default class GLTFParser {
                     });
                 }
             }
-            
+
             parentObject.addChild(node);
             if (nodeDef.children) {
                 let children = nodeDef.children;
@@ -299,6 +301,9 @@ export default class GLTFParser {
                     }
                     if (meshDef.isSkinnedMesh) {
                         shaderDefines += '#define USE_SKINNING 1\n';
+                    }
+                    materialParams.uniforms.TAR_WEIGHT = {
+                        value: meshDef.weights ? new Vec2().fromArray(meshDef.weights) : new Vec2(0)
                     }
                     let program = new Program(parser.gl, {
                         vertex: shaderDefines + PBRBaseShader.vertex,
@@ -447,7 +452,7 @@ export default class GLTFParser {
         let materialParams = {};
         let pending = [];
         let defines = {};
-        let programeOpt = {};
+        let programOpt = {};
 
         // Specification:
         // https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#metallic-roughness-material
@@ -484,8 +489,6 @@ export default class GLTFParser {
         pending.push(parser.loadTextureFromSrc(materialParams, 'tLUT', BRDF_LUT_URL, false));
         if (parser.envDiffuseCubeMapSrc) pending.push(parser.loadCubeMapFromSrc(materialParams, 'tEnvDiffuse', parser.envDiffuseCubeMapSrc, false));
         if (parser.envSpecularCubeMapSrc) pending.push(parser.loadCubeMapFromSrc(materialParams, 'tEnvSpecular', parser.envSpecularCubeMapSrc, false));
-        // This is a multiplier to the amount of specular. Especially useful if you don't have an HDR map.
-        materialParams.uEnvSpecular = { value: 2 };
 
         // Emissive
         if (materialDef.emissiveTexture !== undefined) {
@@ -509,16 +512,16 @@ export default class GLTFParser {
         // Alpha
         let alphaMode = materialDef.alphaMode || ALPHA_MODES.OPAQUE;
         if (alphaMode === ALPHA_MODES.BLEND) {
-            programeOpt.transparent = true;
+            programOpt.transparent = true;
         } else {
-            programeOpt.transparent = false;
+            programOpt.transparent = false;
         }
 
         return Promise.all(pending).then(function () {
             let material = {
                 uniforms: materialParams,
                 glTFLoaderDefines: defines,
-                options: programeOpt
+                options: programOpt
             };
             return material;
         });
@@ -653,48 +656,37 @@ export default class GLTFParser {
 	 */
     loadGeometries(primitives) {
         let parser = this;
+        let cache = this.primitiveCache;
         return this.getDependencies('accessor').then(function (accessors) {
             let pending = [];
             for (let i = 0, il = primitives.length; i < il; i++) {
                 let primitive = primitives[i];
-                let geometry = new Geometry(parser.gl);
-                parser.addPrimitiveAttributes(geometry, primitive, accessors);
-                var geometryPromise = Promise.resolve(geometry);
-                pending.push(geometryPromise);
+                // Check Cache
+                let cached = parser.getCachedGeometry(cache, primitive);
+                if (cached) {
+                    pending.push(cached);
+                } else {
+                    //Todo: Extension
+                    let geometry = new Geometry(parser.gl);
+                    addPrimitiveAttributes(geometry, primitive, accessors);
+                    var geometryPromise = Promise.resolve(geometry);
+                    pending.push(geometryPromise);
+                    cache.push({ primitive: primitive, promise: geometryPromise });
+                }
             }
             return Promise.all(pending).then(function (geometries) {
                 return geometries;
             });
         });
     };
-
-    addPrimitiveAttributes(geometry, primitiveDef, accessors) {
-        let attributes = primitiveDef.attributes;
-        let defines = {};
-        for (let gltfAttributeName in attributes) {
-            // Record the defines
-            switch (gltfAttributeName) {
-                case "NORMAL":
-                    defines.HAS_NORMALS = 1;
-                    break;
-                case "TANGENT":
-                    defines.HAS_TANGENTS = 1;
-                    break;
-                case "TEXCOORD_0":
-                    defines.HAS_UV = 1;
-                    break;
-            }
-            geometry.glTFLoaderDefines = defines;
-            let lglAttributeName = ATTRIBUTES[gltfAttributeName];
-            let bufferAttribute = accessors[attributes[gltfAttributeName]];
-            if (!lglAttributeName) continue;
-            if (lglAttributeName in geometry.attributes) continue;
-            geometry.addAttribute(lglAttributeName, bufferAttribute);
+    getCachedGeometry(cache, newPrimitive) {
+        for (let i = 0, il = cache.length; i < il; i++) {
+            let cached = cache[i];
+            if (isPrimitiveEqual(cached.primitive, newPrimitive)) return cached.promise;
         }
-        if (primitiveDef.indices !== undefined && !geometry.index) {
-            geometry.setIndex(accessors[primitiveDef.indices]);
-        }
+        return null;
     }
+
     /**
 	 * Specification: https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#cameras
 	 * @param {number} cameraIndex
@@ -773,14 +765,9 @@ export default class GLTFParser {
                         //Skeleton Animation
                         node.updateMatrix();
                         node.matrixAutoUpdate = true;
-                        
                         let controlChannel;
                         //Check track format
                         switch (target.path) {
-                            case "weights":
-                                //Morph target
-                                console.error("Unsupport Morph target weights animation now!", node);
-                                break;
                             case "rotation":
                                 controlChannel = node.quaternion; //对象引用,直接改就行
                                 break;
@@ -790,16 +777,21 @@ export default class GLTFParser {
                             case "scale":
                                 controlChannel = node.scale;
                                 break;
-                            default:
+                            case "weights":
+                                //Morph target weights animation
+                                controlChannel = node.program.uniforms.TAR_WEIGHT.value;
                                 break;
                         }
-                        if(controlChannel){
+                        if (controlChannel) {
                             let anim;
-                            if(node.Animation){
+                            if (node.Animation) {
                                 anim = node.Animation;
-                            }else{
+                            } else {
                                 anim = new Animation();
                                 node.Animation = anim;
+                            }
+                            if (target.path === "weights") {
+                                keyFrame.size = 2;
                             }
                             let keyFrameData = sliceBlockData(keyFrame);
                             let animationChannel = new AnimationChannel(controlChannel, timeLine.data, keyFrameData);
@@ -809,7 +801,64 @@ export default class GLTFParser {
                     }
                 }
             }
-			return group;
+            return group;
         });
     };
 };
+
+/**
+ * Specification: https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#morph-targets
+ *
+ */
+function addMorphTargets(geometry, targets, accessors) {
+    let length = targets.length;
+    if (length > 2) console.warn('Unsupport length > 2 targets');
+    for (let i = 0; i < length; i++) {
+        let target = targets[i]
+        for (let key in target) {
+            let bufferAttribute = accessors[target[key]];
+            //Postion
+            if (key === 'POSITION') {
+                let attributeName = `TAR_POSITION_${i}`;
+                geometry.addAttribute(attributeName, bufferAttribute);
+            }
+            //Normal
+            if (key === 'NORMAL') {
+                let attributeName = `TAR_NORMAL_${i}`;
+                geometry.addAttribute(attributeName, bufferAttribute);
+            }
+        }
+    }
+}
+function addPrimitiveAttributes(geometry, primitiveDef, accessors) {
+    let attributes = primitiveDef.attributes;
+    let defines = {};
+    for (let gltfAttributeName in attributes) {
+        // Record the defines
+        switch (gltfAttributeName) {
+            case "NORMAL":
+                defines.HAS_NORMALS = 1;
+                break;
+            case "TANGENT":
+                defines.HAS_TANGENTS = 1;
+                break;
+            case "TEXCOORD_0":
+                defines.HAS_UV = 1;
+                break;
+        }
+        let lglAttributeName = ATTRIBUTES[gltfAttributeName];
+        let bufferAttribute = accessors[attributes[gltfAttributeName]];
+        if (!lglAttributeName) continue;
+        if (lglAttributeName in geometry.attributes) continue;
+        geometry.addAttribute(lglAttributeName, bufferAttribute);
+    }
+    if (primitiveDef.indices !== undefined && !geometry.index) {
+        geometry.setIndex(accessors[primitiveDef.indices]);
+    }
+    if (primitiveDef.targets !== undefined) {
+        defines.HAS_MORPH_TARGETS = 1;
+        addMorphTargets(geometry, primitiveDef.targets, accessors);
+    }
+    geometry.glTFLoaderDefines = defines;
+}
+
